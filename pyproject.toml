@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "diplomska"
+version = "0.1.0"
+description = ""
+authors = ["mariopetkoski <mariopetkoski@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+langchain-ollama = "^0.1.1"
+langchain = "^0.2.12"
+langchain-community = "^0.2.11"
+pandas = "^2.2.2"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
