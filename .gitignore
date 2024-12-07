@@ -1,2 +1,4 @@
 *.csv
 *.db
+*.env
+docker-compose.yaml

@@ -1,3 +1,5 @@
+import os
+
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -8,8 +10,10 @@ from airflow.hooks.base import BaseHook
 from datetime import datetime
 import psycopg2
 import hashlib
+from langchain_community.chat_models import ChatOpenAI
 
-PAGES_MAX = 2
+
+PAGES_MAX = 5
 # TODO: ENV VAR PAGES_MAX
 
 def get_links(**kwargs) -> list:
@@ -62,7 +66,8 @@ def get_property_values(url):
             'Currency': currency,
             'Number_of_rooms': number_of_rooms,
             'Area': area,
-            'Location': location
+            'Location': location,
+            'Url' : url
         }
         return property_data
     else:
@@ -72,7 +77,7 @@ def get_property_values(url):
 
 def extract_property_data(**kwargs):
     links = kwargs['ti'].xcom_pull(key='property_links', task_ids='fetch_links')
-    dataframe = pd.DataFrame(columns=['Title', 'Price', 'Currency', 'Number_of_rooms', 'Area', 'Location'])
+    dataframe = pd.DataFrame(columns=['Title', 'Price', 'Currency', 'Number_of_rooms', 'Area', 'Location', 'Url'])
 
     for link in tqdm(links):
         row = get_property_values('https://www.pazar3.mk' + link)
@@ -95,21 +100,83 @@ def transform_property_data(**kwargs):
     dataframe['Area(m2)'] = pd.to_numeric(dataframe['Area(m2)'], errors='coerce')
     dataframe['Number_of_rooms'] = pd.to_numeric(dataframe['Number_of_rooms'], errors='coerce')
 
-    # print(dataframe.head())
+    print("Pre-filtering rows:", len(dataframe))
+    # Drop rows with any empty values (NaNs) in the critical columns
+    dataframe.dropna(inplace=True)
+
+    # Drop duplicate rows based on all columns or specific columns
+    dataframe.drop_duplicates(inplace=True)
+
+    print("Post-filtering rows:", len(dataframe))
+
+    dataframe['Id'] = dataframe.apply(
+        lambda row: hashlib.md5(
+            f"{row['Title']}_{row['Price']}"
+            f"_{row['Currency']}_{row['Number_of_rooms']}"
+            f"_{row['Area(m2)']}_{row['Location']}"
+            f"_{row['Url']}"
+            .encode('utf-8')
+        ).hexdigest(),
+        axis=1
+    )
+
     print(dataframe.info())
 
     # Optionally save the transformed dataframe or store it for further tasks
     kwargs['ti'].xcom_push(key='transformed_dataframe', value=dataframe.to_dict())
 
-    # TODO:
-    # hash, duplicates, outliers etc...
+
+import pandas as pd
+import psycopg2
 
 def write_to_db(**kwargs):
+    import os
+    import pandas as pd
+    import psycopg2
+    from langchain.chat_models import ChatOpenAI
+
     # Fetch the transformed dataframe from XCom
     dataframe_dict = kwargs['ti'].xcom_pull(key='transformed_dataframe', task_ids='transform_property_data')
     dataframe = pd.DataFrame.from_dict(dataframe_dict)
 
-    # connection = BaseHook.get_connection('postgres_connection')  # Replace with your actual connection ID
+    key = os.environ.get('OPENAI_API_KEY')
+    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, api_key=key)
+
+    # Define a prompt to evaluate the accuracy of the title based on other columns
+    prompt_template = """
+    Given the following property details:
+    - Price: {price} {currency}
+    - Number of rooms: {number_of_rooms}
+    - Area in m2: {area_m2}
+    - Location: {location}
+
+    Evaluate the accuracy of the title: "{title}" on a scale from 1 to 10, where 10 is the most accurate.
+    Respond with only the score.
+    """
+
+    # Create an empty column for the accuracy scores
+    dataframe['Accuracy'] = 0
+
+    # Loop through each row and get the accuracy score from the LLM
+    for index, row in dataframe.iterrows():
+        prompt = prompt_template.format(
+            price=row['Price'],
+            currency=row['Currency'],
+            number_of_rooms=row['Number_of_rooms'],
+            area_m2=row['Area(m2)'],
+            location=row['Location'],
+            title=row['Title'],
+        )
+
+        # Invoke the LLM with the constructed prompt
+        response = llm.invoke(prompt)
+        try:
+            # Parse the response and set the score in the dataframe
+            accuracy_score = int(response.content.strip())
+            dataframe.at[index, 'Accuracy'] = accuracy_score
+        except ValueError:
+            # Handle any unexpected responses gracefully
+            dataframe.at[index, 'Accuracy'] = 0
 
     # Create a connection to the PostgreSQL database
     conn = psycopg2.connect(
@@ -122,20 +189,24 @@ def write_to_db(**kwargs):
 
     cursor = conn.cursor()
 
-    # Insert data into the database
+    # Insert data into the database with conflict resolution
     insert_query = """
-        INSERT INTO real_estate_listings (Title, Price, Currency, Number_of_rooms, Area_m2, Location)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """
+        INSERT INTO real_estate_listings (Id, Title, Price, Currency, Number_of_rooms, Area_m2, Location, Url,Accuracy)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (Id) DO NOTHING
+    """
 
-    for index, row in dataframe.iterrows():
+    for _, row in dataframe.iterrows():
         cursor.execute(insert_query, (
+            row['Id'],
             row['Title'],
             row['Price'],
             row['Currency'],
             row['Number_of_rooms'],
             row['Area(m2)'],
-            row['Location']
+            row['Location'],
+            row['Url'],
+            row['Accuracy']
         ))
 
     # Commit the transaction and close the connection
@@ -144,7 +215,6 @@ def write_to_db(**kwargs):
     conn.close()
 
     print("Data successfully written to the database")
-
 
 
 # Define the DAG

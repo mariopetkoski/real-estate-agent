@@ -150,11 +150,13 @@ services:
         condition: service_completed_successfully
 
   airflow-worker:
+    env_file:
+      - .env
     <<: *airflow-common
     command: celery worker
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: airflow.Dockerfile
     healthcheck:
       # yamllint disable rule:line-length
       test:
@@ -288,6 +290,23 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+
+  streamlit:
+    env_file:
+      - .env
+    build:
+      context: .
+      dockerfile: streamlit.Dockerfile
+    container_name: streamlit_app
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+
+    restart: unless-stopped
 
 volumes:
   postgres-db-volume:
